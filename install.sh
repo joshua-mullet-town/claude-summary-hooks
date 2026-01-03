@@ -31,107 +31,54 @@ chmod +x "$BIN_DIR/claude-summary"
 
 echo "  Installed claude-summary to $BIN_DIR"
 
-# Update Claude settings.json
-if [ -f "$SETTINGS_FILE" ]; then
-    # Check if we have jq for JSON manipulation
-    if command -v jq >/dev/null 2>&1; then
-        # Read existing settings and add/update hooks
-        TEMP_FILE=$(mktemp)
+# Update Claude settings.json (preserving existing hooks)
+if ! command -v jq >/dev/null 2>&1; then
+    echo "  WARNING: jq not found, skipping settings.json update"
+    echo "  Install jq (brew install jq) and re-run, or manually configure hooks"
+else
+    # Create settings file if it doesn't exist
+    if [ ! -f "$SETTINGS_FILE" ]; then
+        mkdir -p "$(dirname "$SETTINGS_FILE")"
+        echo '{}' > "$SETTINGS_FILE"
+    fi
 
-        # Add UserPromptSubmit hook if not present
-        jq --arg hook "$HOOKS_DIR/user_prompt_submit.py" '
-            .hooks.UserPromptSubmit = [
-                {
-                    "matcher": "*",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": ("python3 " + $hook),
-                            "timeout": 10
-                        }
-                    ]
-                }
-            ]
-        ' "$SETTINGS_FILE" > "$TEMP_FILE"
+    EXISTING=$(cat "$SETTINGS_FILE")
 
-        # Add Stop hook (preserving existing ones)
-        jq --arg hook "$HOOKS_DIR/stop.py" '
-            if .hooks.Stop then
-                # Check if our hook already exists
-                if (.hooks.Stop | map(select(.hooks[]?.command | contains("stop.py"))) | length) > 0 then
-                    .
-                else
-                    .hooks.Stop += [
-                        {
-                            "matcher": "*",
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": ("python3 " + $hook),
-                                    "timeout": 30
-                                }
-                            ]
-                        }
-                    ]
-                end
-            else
-                .hooks.Stop = [
+    # Add UserPromptSubmit hook (replace - we own this hook type entirely)
+    EXISTING=$(echo "$EXISTING" | jq --arg hook "$HOOKS_DIR/user_prompt_submit.py" '
+        .hooks.UserPromptSubmit = [
+            {
+                "matcher": "*",
+                "hooks": [
                     {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": ("python3 " + $hook),
-                                "timeout": 30
-                            }
-                        ]
+                        "type": "command",
+                        "command": ("python3 " + $hook),
+                        "timeout": 10
                     }
                 ]
-            end
-        ' "$TEMP_FILE" > "${TEMP_FILE}.2"
+            }
+        ]
+    ')
 
-        mv "${TEMP_FILE}.2" "$SETTINGS_FILE"
-        rm -f "$TEMP_FILE"
-
-        echo "  Updated Claude settings"
+    # Add Stop hook (append if not already present)
+    if echo "$EXISTING" | jq -e '.hooks.Stop[]?.hooks[]?.command | select(contains("claude-summary-hooks") or contains("stop.py"))' > /dev/null 2>&1; then
+        echo "  Summary stop hook already installed"
     else
-        echo "  WARNING: jq not found, skipping settings.json update"
-        echo "  Install jq (brew install jq) and re-run, or manually configure hooks"
+        STOP_HOOK=$(jq -n --arg hook "$HOOKS_DIR/stop.py" '{
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": ("python3 " + $hook),
+                "timeout": 30
+            }]
+        }')
+        EXISTING=$(echo "$EXISTING" | jq --argjson hook "$STOP_HOOK" '
+            .hooks.Stop = ((.hooks.Stop // []) + [$hook])
+        ')
     fi
-else
-    # Create new settings file
-    mkdir -p "$(dirname "$SETTINGS_FILE")"
-    cat > "$SETTINGS_FILE" << EOF
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 $HOOKS_DIR/user_prompt_submit.py",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 $HOOKS_DIR/stop.py",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
-  }
-}
-EOF
-    echo "  Created Claude settings"
+
+    echo "$EXISTING" > "$SETTINGS_FILE"
+    echo "  Updated Claude settings (preserving existing hooks)"
 fi
 
 # Check for Ollama
