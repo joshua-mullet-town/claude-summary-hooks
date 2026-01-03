@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# Claude Summary Live Viewer - Just the summary, nothing else
+# Press Ctrl+C to exit
+
+SUMMARY_FILE=".claude/SUMMARY.txt"
+
+# Check if we're in a project directory
+if [ ! -f "$SUMMARY_FILE" ]; then
+    echo "No summary found (.claude/SUMMARY.txt)"
+    exit 1
+fi
+
+# Trap Ctrl+C to exit silently
+trap 'exit 0' INT
+
+# Check if fswatch is available for file watching
+if command -v fswatch >/dev/null 2>&1; then
+    # Show initial, then watch for changes
+    clear
+    cat "$SUMMARY_FILE"
+    fswatch -o "$SUMMARY_FILE" 2>/dev/null | while read; do
+        clear
+        cat "$SUMMARY_FILE"
+    done
+else
+    # Fallback: poll every 2 seconds
+    last_mod=""
+    while true; do
+        current_mod=$(stat -f "%m" "$SUMMARY_FILE" 2>/dev/null)
+        if [ "$current_mod" != "$last_mod" ]; then
+            clear
+            cat "$SUMMARY_FILE"
+            last_mod="$current_mod"
+        fi
+        sleep 2
+    done
+fi
