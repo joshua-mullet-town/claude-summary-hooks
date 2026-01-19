@@ -2,19 +2,18 @@
 """
 Stop Hook - Session Summary Generator
 Reads the transcript, extracts last assistant response, includes project context
-(CLAUDE.md and PLAN.md), calls Ollama to generate a summary, and saves to the project.
+(CLAUDE.md and PLAN.md), calls Claude Code CLI (haiku) to generate a summary, and saves to the project.
 """
 
 import json
 import re
 import sys
 import os
-import urllib.request
-import urllib.error
+import subprocess
 from datetime import datetime
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "phi3:3.8b"  # Microsoft's Phi-3, 128K context, excellent for summarization
+# Use Claude Code CLI instead of local Ollama for better quality summaries
+CLAUDE_MODEL = "haiku"  # Fast and cheap, good for summaries
 DEBUG_LOG = "/tmp/claude-debug-stop.log"
 
 def debug_log(message):
@@ -106,7 +105,7 @@ def build_conversation_text(exchanges: list) -> str:
 
 
 def generate_summary(conversation_text: str, project_context: dict) -> str:
-    """Call Ollama to generate a brief 2-line summary with project context."""
+    """Call Claude Code CLI to generate a brief 2-line summary with project context."""
     # Truncate conversation if too long
     max_conversation_len = 6000
     if len(conversation_text) > max_conversation_len:
@@ -136,29 +135,30 @@ USER asked [one sentence - what user wanted across the session]
 AGENT [one sentence - what was accomplished]"""
 
     try:
-        payload = json.dumps({
-            "model": OLLAMA_MODEL,
-            "prompt": summary_prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.3,
-                "num_predict": 200
-            }
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            OLLAMA_URL,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST"
+        # Call Claude Code CLI in one-shot mode
+        result = subprocess.run(
+            [
+                "claude", "-p",
+                "--model", CLAUDE_MODEL,
+                "--tools", "",  # Disable tools, just text generation
+                "--no-session-persistence",  # Don't save this as a session
+                summary_prompt
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30
         )
 
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result.get("response", "").strip()
+        if result.returncode == 0:
+            return result.stdout.strip()
+        else:
+            debug_log(f"Claude CLI error: {result.stderr}")
+            return f"USER asked: (see conversation)\nAGENT: (Claude CLI error: {result.returncode})"
 
-    except urllib.error.URLError:
-        return "USER asked: (see conversation)\nAGENT: (Ollama not available)"
+    except subprocess.TimeoutExpired:
+        return "USER asked: (see conversation)\nAGENT: (Claude CLI timeout)"
+    except FileNotFoundError:
+        return "USER asked: (see conversation)\nAGENT: (Claude CLI not found)"
     except Exception as e:
         return f"USER asked: (see conversation)\nAGENT: (error: {e})"
 

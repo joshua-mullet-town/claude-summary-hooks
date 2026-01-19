@@ -81,21 +81,14 @@ else
     echo "  Updated Claude settings (preserving existing hooks)"
 fi
 
-# Check for Ollama
+# Check for Claude CLI
 echo ""
-if command -v ollama >/dev/null 2>&1; then
-    echo "Ollama found. Checking for phi3 model..."
-    if ollama list 2>/dev/null | grep -q "phi3"; then
-        echo "  phi3 model ready!"
-    else
-        echo "  phi3 model not found. Installing..."
-        ollama pull phi3:3.8b
-    fi
+if command -v claude >/dev/null 2>&1; then
+    echo "Claude CLI found!"
 else
-    echo "WARNING: Ollama not found!"
-    echo "  Install: brew install ollama"
-    echo "  Then run: ollama serve"
-    echo "  And pull model: ollama pull phi3:3.8b"
+    echo "WARNING: Claude CLI not found!"
+    echo "  The summary hooks use 'claude -p --model haiku' to generate summaries."
+    echo "  Make sure Claude Code CLI is installed and in your PATH."
 fi
 
 echo ""
@@ -103,9 +96,8 @@ echo "Installation complete!"
 echo ""
 echo "Next steps:"
 echo "  1. Restart Claude Code to pick up the new hooks"
-echo "  2. Make sure Ollama is running (ollama serve)"
-echo "  3. Summaries will appear in .claude/SUMMARY.txt after each response"
-echo "  4. Run 'claude-summary' in any project for live streaming view"
+echo "  2. Summaries will appear in .claude/SUMMARY.txt after each session"
+echo "  3. Run 'claude-summary' in any project for live streaming view"
 echo ""
 echo "Make sure $BIN_DIR is in your PATH:"
 echo '  export PATH="$HOME/.local/bin:$PATH"'
