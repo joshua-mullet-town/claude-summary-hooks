@@ -24,6 +24,32 @@ def debug_log(message):
         f.flush()
 
 
+def write_session_file(session_id: str, cwd: str, status: str, summary: str = None):
+    """Write session state to ~/.claude/sessions/ for Whisper Village to read."""
+    sessions_dir = os.path.expanduser("~/.claude/sessions")
+    os.makedirs(sessions_dir, exist_ok=True)
+
+    # Use a hash of cwd as filename to avoid path issues
+    import hashlib
+    cwd_hash = hashlib.md5(cwd.encode()).hexdigest()[:12]
+    session_file = os.path.join(sessions_dir, f"{cwd_hash}.json")
+
+    session_data = {
+        "sessionId": session_id,
+        "cwd": cwd,
+        "status": status,
+        "summary": summary,
+        "updatedAt": datetime.now().isoformat()
+    }
+
+    try:
+        with open(session_file, "w") as f:
+            json.dump(session_data, f, indent=2)
+        debug_log(f"Wrote session file: {session_file}")
+    except Exception as e:
+        debug_log(f"Error writing session file: {e}")
+
+
 def read_project_context(cwd: str) -> dict:
     """Read CLAUDE.md and PLAN.md for project context."""
     context = {
@@ -265,6 +291,9 @@ def main():
         debug_log("Successfully wrote summary file")
     except Exception as e:
         debug_log(f"Error writing summary: {e}")
+
+    # Write session file for Whisper Village session dots
+    write_session_file(session_id, cwd, "waiting", summary)
 
     debug_log("Stop Hook FINISHED")
 

@@ -2,12 +2,14 @@
 """
 UserPromptSubmit Hook - Message Assistant
 Captures the user's prompt and appends to conversation history (last 5 exchanges).
+Also writes session status to ~/.claude/sessions/ for Whisper Village.
 """
 
 import json
 import sys
 import os
 import datetime
+import hashlib
 
 MAX_EXCHANGES = 5  # Keep last 5 user/assistant pairs
 DEBUG_LOG = "/tmp/claude-debug-user-prompt.log"
@@ -18,6 +20,41 @@ def debug_log(message):
     with open(DEBUG_LOG, "a") as f:
         f.write(f"[{timestamp}] {message}\n")
         f.flush()
+
+
+def write_session_file(session_id: str, cwd: str, status: str, summary: str = None):
+    """Write session state to ~/.claude/sessions/ for Whisper Village to read."""
+    sessions_dir = os.path.expanduser("~/.claude/sessions")
+    os.makedirs(sessions_dir, exist_ok=True)
+
+    # Use a hash of cwd as filename to avoid path issues
+    cwd_hash = hashlib.md5(cwd.encode()).hexdigest()[:12]
+    session_file = os.path.join(sessions_dir, f"{cwd_hash}.json")
+
+    # Read existing summary if available
+    existing_summary = summary
+    if not existing_summary and os.path.exists(session_file):
+        try:
+            with open(session_file, "r") as f:
+                existing_data = json.load(f)
+                existing_summary = existing_data.get("summary")
+        except:
+            pass
+
+    session_data = {
+        "sessionId": session_id,
+        "cwd": cwd,
+        "status": status,
+        "summary": existing_summary,
+        "updatedAt": datetime.datetime.now().isoformat()
+    }
+
+    try:
+        with open(session_file, "w") as f:
+            json.dump(session_data, f, indent=2)
+        debug_log(f"Wrote session file: {session_file} (status: {status})")
+    except Exception as e:
+        debug_log(f"Error writing session file: {e}")
 
 def main():
     debug_log("UserPromptSubmit Hook STARTED")
@@ -88,6 +125,9 @@ def main():
         debug_log(f"Successfully wrote conversation to {temp_file}")
     except Exception as e:
         debug_log(f"Error writing conversation file: {e}")
+
+    # Write session file with "working" status for Whisper Village
+    write_session_file(session_id, cwd, "working")
 
     debug_log("UserPromptSubmit Hook FINISHED")
     sys.exit(0)
