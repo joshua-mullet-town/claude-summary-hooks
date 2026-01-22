@@ -25,7 +25,12 @@ def debug_log(message):
 
 
 def write_session_file(session_id: str, cwd: str, status: str, summary: str = None):
-    """Write session state to ~/.claude/sessions/ for Whisper Village to read."""
+    """Write session state to ~/.claude/sessions/ for Whisper Village to read.
+
+    Summary can be either:
+    - A plain string (legacy format): "USER asked: ...\nAGENT: ..."
+    - A JSON string: {"user_summary": "...", "agent_summary": "..."}
+    """
     sessions_dir = os.path.expanduser("~/.claude/sessions")
     os.makedirs(sessions_dir, exist_ok=True)
 
@@ -34,11 +39,45 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
     cwd_hash = hashlib.md5(cwd.encode()).hexdigest()[:12]
     session_file = os.path.join(sessions_dir, f"{cwd_hash}.json")
 
+    # Try to parse summary as JSON for structured format
+    user_summary = None
+    agent_summary = None
+    if summary:
+        # Strip markdown code fences if present
+        clean_summary = summary.strip()
+        if clean_summary.startswith("```"):
+            # Remove opening fence (```json or ```)
+            lines = clean_summary.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            # Remove closing fence
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            clean_summary = "\n".join(lines).strip()
+
+        try:
+            parsed = json.loads(clean_summary)
+            if isinstance(parsed, dict):
+                user_summary = parsed.get("user_summary")
+                agent_summary = parsed.get("agent_summary")
+                debug_log(f"Parsed structured summary: user={user_summary[:50] if user_summary else None}...")
+        except json.JSONDecodeError:
+            debug_log(f"JSON parse failed, trying legacy format")
+            # Legacy format - try to extract from "USER asked: ...\nAGENT: ..."
+            lines = summary.strip().split("\n")
+            for line in lines:
+                if line.startswith("USER"):
+                    user_summary = line.replace("USER asked:", "").replace("USER asked", "").replace("USER:", "").strip()
+                elif line.startswith("AGENT"):
+                    agent_summary = line.replace("AGENT:", "").strip()
+
     session_data = {
         "sessionId": session_id,
         "cwd": cwd,
         "status": status,
-        "summary": summary,
+        "summary": summary,  # Keep raw for backwards compat
+        "userSummary": user_summary,
+        "agentSummary": agent_summary,
         "updatedAt": datetime.now().isoformat()
     }
 
@@ -151,14 +190,24 @@ def generate_summary(conversation_text: str, project_context: dict) -> str:
 
     context_section = "\n\n".join(context_parts) if context_parts else ""
 
-    summary_prompt = f"""Summarize this coding session.
+    summary_prompt = f"""Summarize this coding session in MINIMAL words.
 {f"{chr(10)}PROJECT: {context_section[:300]}{chr(10)}" if context_section else ""}
 CONVERSATION:
 {conversation_text}
 
-Respond with EXACTLY two lines, no other text:
-USER asked [one sentence - what user wanted across the session]
-AGENT [one sentence - what was accomplished]"""
+CRITICAL: Be EXTREMELY concise. Max 8-10 words each. No filler words. Telegraph style.
+
+Respond with ONLY valid JSON, no markdown, no code fences:
+{{"user_summary": "max 10 words - what user wanted", "agent_summary": "max 10 words - what was done"}}
+
+Examples of good summaries:
+- "user_summary": "Add dark mode toggle"
+- "agent_summary": "Implemented theme switcher in settings"
+
+- "user_summary": "Fix login crash on iOS"
+- "agent_summary": "Fixed nil pointer in auth flow"
+
+Be this concise."""
 
     try:
         # Call Claude Code CLI in one-shot mode
@@ -273,8 +322,8 @@ def main():
     project_context = read_project_context(cwd)
     debug_log(f"Project context loaded - claude_md: {len(project_context.get('claude_md', ''))}, plan_md: {len(project_context.get('plan_md', ''))}")
 
-    # Generate summary using Ollama (local, no infinite loop risk)
-    debug_log("Calling Ollama to generate summary...")
+    # Generate summary using Claude Haiku
+    debug_log("Calling Claude Haiku to generate summary...")
     summary = generate_summary(conversation_text, project_context)
     debug_log(f"Generated summary: {len(summary)} chars")
 
