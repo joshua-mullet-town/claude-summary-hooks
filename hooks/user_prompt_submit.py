@@ -31,13 +31,16 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
     cwd_hash = hashlib.md5(cwd.encode()).hexdigest()[:12]
     session_file = os.path.join(sessions_dir, f"{cwd_hash}.json")
 
-    # Read existing summary if available
+    # Read existing data to preserve summary and displayName
     existing_summary = summary
-    if not existing_summary and os.path.exists(session_file):
+    display_name = None
+    if os.path.exists(session_file):
         try:
             with open(session_file, "r") as f:
                 existing_data = json.load(f)
-                existing_summary = existing_data.get("summary")
+                if not existing_summary:
+                    existing_summary = existing_data.get("summary")
+                display_name = existing_data.get("displayName")
         except:
             pass
 
@@ -48,6 +51,8 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
         "summary": existing_summary,
         "updatedAt": datetime.datetime.now().isoformat()
     }
+    if display_name:
+        session_data["displayName"] = display_name
 
     try:
         with open(session_file, "w") as f:

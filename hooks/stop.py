@@ -90,6 +90,16 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
                 elif line.startswith("AGENT"):
                     agent_summary = line.replace("AGENT:", "").strip()
 
+    # Preserve displayName if previously set by user
+    display_name = None
+    if os.path.exists(session_file):
+        try:
+            with open(session_file, "r") as f:
+                existing = json.load(f)
+                display_name = existing.get("displayName")
+        except:
+            pass
+
     session_data = {
         "sessionId": session_id,
         "cwd": cwd,
@@ -99,6 +109,8 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
         "agentSummary": agent_summary,
         "updatedAt": datetime.now().isoformat()
     }
+    if display_name:
+        session_data["displayName"] = display_name
 
     try:
         with open(session_file, "w") as f:
