@@ -81,20 +81,25 @@ else
     ')
 
     # Add Stop hook (replace existing summary hook if present)
-    # Remove any existing stop.py hooks first, then add fresh
+    # Remove any existing stop.py or combined-stop.sh hooks first, then add fresh
     EXISTING=$(echo "$EXISTING" | jq --arg cmd "$PYTHON3_PATH $HOOKS_DIR/stop.py" '
         .hooks.Stop = (
-            [(.hooks.Stop // [])[] | select(.hooks[0].command | contains("stop.py") | not)]
+            [(.hooks.Stop // [])[] | select(
+                (.hooks[0].command | (contains("stop.py") or contains("combined-stop"))) | not
+            )]
             + [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
                     "command": $cmd,
-                    "timeout": 30
+                    "timeout": 60
                 }]
             }]
         )
     ')
+
+    # Clean up legacy combined-stop.sh if it exists
+    rm -f "$HOOKS_DIR/combined-stop.sh"
 
     echo "$EXISTING" > "$SETTINGS_FILE"
     echo "  Updated Claude settings (preserving existing hooks)"

@@ -261,6 +261,98 @@ Be this concise."""
         return f"USER asked: (see conversation)\nAGENT: (error: {e})"
 
 
+def _run_summary_pipeline(session_id: str, transcript_path: str, cwd_from_input: str):
+    """Run the full summary pipeline. Raises on failure so caller can handle."""
+    # Read conversation from UserPromptSubmit hook
+    temp_file = f"/tmp/claude-{session_id}-conversation.json"
+    debug_log(f"Looking for conversation file: {temp_file}")
+
+    if not os.path.exists(temp_file):
+        debug_log(f"Conversation file not found: {temp_file}")
+        return
+
+    debug_log("Found conversation file")
+
+    try:
+        with open(temp_file, "r") as f:
+            conversation = json.load(f)
+        debug_log(f"Loaded conversation: {len(conversation.get('exchanges', []))} exchanges")
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        debug_log(f"Error reading conversation file: {e}")
+        return
+
+    cwd = conversation.get("cwd", cwd_from_input)
+    exchanges = conversation.get("exchanges", [])
+    debug_log(f"Conversation data - cwd: {cwd}, exchanges: {len(exchanges)}")
+
+    if not cwd or not exchanges:
+        debug_log(f"Missing required data - cwd: {bool(cwd)}, exchanges: {bool(exchanges)}")
+        # Still write waiting status with no summary
+        if cwd:
+            write_session_file(session_id, cwd, "waiting", None)
+        return
+
+    # Extract last assistant response from transcript
+    debug_log(f"Extracting assistant response from transcript: {transcript_path}")
+    assistant_response = extract_last_assistant_response(transcript_path)
+    debug_log(f"Assistant response length: {len(assistant_response) if assistant_response else 0}")
+
+    if not assistant_response:
+        debug_log("No assistant response found - marking waiting without summary")
+        write_session_file(session_id, cwd, "waiting", None)
+        return
+
+    # Fill in the assistant response for the last exchange
+    if exchanges and exchanges[-1].get("assistant") is None:
+        exchanges[-1]["assistant"] = assistant_response
+        debug_log("Filled in assistant response for last exchange")
+
+    # Save updated conversation back
+    conversation["exchanges"] = exchanges
+    try:
+        with open(temp_file, "w") as f:
+            json.dump(conversation, f)
+        debug_log("Updated conversation file")
+    except Exception as e:
+        debug_log(f"Error updating conversation: {e}")
+
+    # Build conversation text for summary (all complete exchanges)
+    conversation_text = build_conversation_text(exchanges)
+    debug_log(f"Built conversation text: {len(conversation_text)} chars")
+
+    if not conversation_text:
+        debug_log("No conversation text to summarize")
+        write_session_file(session_id, cwd, "waiting", None)
+        return
+
+    # Read project context (CLAUDE.md and PLAN.md)
+    debug_log(f"Reading project context from: {cwd}")
+    project_context = read_project_context(cwd)
+    debug_log(f"Project context loaded - claude_md: {len(project_context.get('claude_md', ''))}, plan_md: {len(project_context.get('plan_md', ''))}")
+
+    # Generate summary using Claude Haiku
+    debug_log("Calling Claude Haiku to generate summary...")
+    summary = generate_summary(conversation_text, project_context)
+    debug_log(f"Generated summary: {len(summary)} chars")
+
+    # Write slim summary to .claude/SUMMARY.txt (for HUD display)
+    output_dir = os.path.join(cwd, ".claude")
+    os.makedirs(output_dir, exist_ok=True)
+
+    summary_path = os.path.join(output_dir, "SUMMARY.txt")
+    debug_log(f"Writing summary to: {summary_path}")
+
+    try:
+        with open(summary_path, "w") as f:
+            f.write(summary)
+        debug_log("Successfully wrote summary file")
+    except Exception as e:
+        debug_log(f"Error writing summary: {e}")
+
+    # Write session file for Whisper Village session dots
+    write_session_file(session_id, cwd, "waiting", summary)
+
+
 def main():
     # Ensure common binary locations are in PATH (hooks may run with stripped environment)
     extra_paths = [
@@ -294,91 +386,17 @@ def main():
 
     session_id = input_data.get("session_id", "unknown")
     transcript_path = input_data.get("transcript_path", "")
-    debug_log(f"Extracted - session_id: {session_id}, transcript_path: {transcript_path}")
+    cwd = input_data.get("cwd", os.getcwd())
+    debug_log(f"Extracted - session_id: {session_id}, transcript_path: {transcript_path}, cwd: {cwd}")
 
-    # Read conversation from UserPromptSubmit hook
-    temp_file = f"/tmp/claude-{session_id}-conversation.json"
-    debug_log(f"Looking for conversation file: {temp_file}")
-
-    if not os.path.exists(temp_file):
-        debug_log(f"Conversation file not found: {temp_file}")
-        sys.exit(0)
-
-    debug_log("Found conversation file")
-
+    # Always mark session as "waiting" when stop fires, even if summary fails
+    # This prevents dots from staying orange forever
     try:
-        with open(temp_file, "r") as f:
-            conversation = json.load(f)
-        debug_log(f"Loaded conversation: {len(conversation.get('exchanges', []))} exchanges")
-    except (json.JSONDecodeError, FileNotFoundError) as e:
-        debug_log(f"Error reading conversation file: {e}")
-        sys.exit(0)
-
-    cwd = conversation.get("cwd", "")
-    exchanges = conversation.get("exchanges", [])
-    debug_log(f"Conversation data - cwd: {cwd}, exchanges: {len(exchanges)}")
-
-    if not cwd or not exchanges:
-        debug_log(f"Missing required data - cwd: {bool(cwd)}, exchanges: {bool(exchanges)}")
-        sys.exit(0)
-
-    # Extract last assistant response from transcript
-    debug_log(f"Extracting assistant response from transcript: {transcript_path}")
-    assistant_response = extract_last_assistant_response(transcript_path)
-    debug_log(f"Assistant response length: {len(assistant_response) if assistant_response else 0}")
-
-    if not assistant_response:
-        debug_log("No assistant response found")
-        sys.exit(0)
-
-    # Fill in the assistant response for the last exchange
-    if exchanges and exchanges[-1].get("assistant") is None:
-        exchanges[-1]["assistant"] = assistant_response
-        debug_log("Filled in assistant response for last exchange")
-
-    # Save updated conversation back
-    conversation["exchanges"] = exchanges
-    try:
-        with open(temp_file, "w") as f:
-            json.dump(conversation, f)
-        debug_log("Updated conversation file")
+        _run_summary_pipeline(session_id, transcript_path, cwd)
     except Exception as e:
-        debug_log(f"Error updating conversation: {e}")
-
-    # Build conversation text for summary (all complete exchanges)
-    conversation_text = build_conversation_text(exchanges)
-    debug_log(f"Built conversation text: {len(conversation_text)} chars")
-
-    if not conversation_text:
-        debug_log("No conversation text to summarize")
-        sys.exit(0)
-
-    # Read project context (CLAUDE.md and PLAN.md)
-    debug_log(f"Reading project context from: {cwd}")
-    project_context = read_project_context(cwd)
-    debug_log(f"Project context loaded - claude_md: {len(project_context.get('claude_md', ''))}, plan_md: {len(project_context.get('plan_md', ''))}")
-
-    # Generate summary using Claude Haiku
-    debug_log("Calling Claude Haiku to generate summary...")
-    summary = generate_summary(conversation_text, project_context)
-    debug_log(f"Generated summary: {len(summary)} chars")
-
-    # Write slim summary to .claude/SUMMARY.txt (for HUD display)
-    output_dir = os.path.join(cwd, ".claude")
-    os.makedirs(output_dir, exist_ok=True)
-
-    summary_path = os.path.join(output_dir, "SUMMARY.txt")
-    debug_log(f"Writing summary to: {summary_path}")
-
-    try:
-        with open(summary_path, "w") as f:
-            f.write(summary)
-        debug_log("Successfully wrote summary file")
-    except Exception as e:
-        debug_log(f"Error writing summary: {e}")
-
-    # Write session file for Whisper Village session dots
-    write_session_file(session_id, cwd, "waiting", summary)
+        debug_log(f"Summary pipeline error: {e}")
+        # Still mark as waiting even on failure
+        write_session_file(session_id, cwd, "waiting", None)
 
     debug_log("Stop Hook FINISHED")
 
