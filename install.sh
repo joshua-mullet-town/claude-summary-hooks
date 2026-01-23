@@ -44,15 +44,29 @@ else
 
     EXISTING=$(cat "$SETTINGS_FILE")
 
+    # Resolve python3 to REAL path (not pyenv shim) for portability
+    # pyenv shims won't work in Claude Code hook subprocesses
+    if command -v pyenv >/dev/null 2>&1; then
+        # Get the actual python3 binary pyenv resolves to
+        PYTHON3_PATH=$(pyenv which python3 2>/dev/null || command -v python3 2>/dev/null || echo "/usr/bin/python3")
+    else
+        PYTHON3_PATH=$(command -v python3 2>/dev/null || echo "/usr/bin/python3")
+    fi
+    # Follow symlinks to get the true path
+    if [ -L "$PYTHON3_PATH" ]; then
+        PYTHON3_PATH=$(readlink -f "$PYTHON3_PATH" 2>/dev/null || python3 -c "import sys; print(sys.executable)" 2>/dev/null || echo "$PYTHON3_PATH")
+    fi
+    echo "  Using Python: $PYTHON3_PATH"
+
     # Add UserPromptSubmit hook (replace - we own this hook type entirely)
-    EXISTING=$(echo "$EXISTING" | jq --arg hook "$HOOKS_DIR/user_prompt_submit.py" '
+    EXISTING=$(echo "$EXISTING" | jq --arg cmd "$PYTHON3_PATH $HOOKS_DIR/user_prompt_submit.py" '
         .hooks.UserPromptSubmit = [
             {
                 "matcher": "*",
                 "hooks": [
                     {
                         "type": "command",
-                        "command": ("python3 " + $hook),
+                        "command": $cmd,
                         "timeout": 10
                     }
                 ]
@@ -60,22 +74,21 @@ else
         ]
     ')
 
-    # Add Stop hook (append if not already present)
-    if echo "$EXISTING" | jq -e '.hooks.Stop[]?.hooks[]?.command | select(contains("claude-summary-hooks") or contains("stop.py"))' > /dev/null 2>&1; then
-        echo "  Summary stop hook already installed"
-    else
-        STOP_HOOK=$(jq -n --arg hook "$HOOKS_DIR/stop.py" '{
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "command": ("python3 " + $hook),
-                "timeout": 30
+    # Add Stop hook (replace existing summary hook if present)
+    # Remove any existing stop.py hooks first, then add fresh
+    EXISTING=$(echo "$EXISTING" | jq --arg cmd "$PYTHON3_PATH $HOOKS_DIR/stop.py" '
+        .hooks.Stop = (
+            [(.hooks.Stop // [])[] | select(.hooks[0].command | contains("stop.py") | not)]
+            + [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": $cmd,
+                    "timeout": 30
+                }]
             }]
-        }')
-        EXISTING=$(echo "$EXISTING" | jq --argjson hook "$STOP_HOOK" '
-            .hooks.Stop = ((.hooks.Stop // []) + [$hook])
-        ')
-    fi
+        )
+    ')
 
     echo "$EXISTING" > "$SETTINGS_FILE"
     echo "  Updated Claude settings (preserving existing hooks)"

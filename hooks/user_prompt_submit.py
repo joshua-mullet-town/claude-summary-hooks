@@ -57,9 +57,22 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
         debug_log(f"Error writing session file: {e}")
 
 def main():
+    # Ensure common binary locations are in PATH (hooks may run with stripped environment)
+    extra_paths = [
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.claude/local"),
+        "/usr/local/bin",
+        os.path.expanduser("~/.npm-global/bin"),
+    ]
+    current_path = os.environ.get("PATH", "")
+    for p in extra_paths:
+        if p not in current_path:
+            current_path = f"{p}:{current_path}"
+    os.environ["PATH"] = current_path
+
     debug_log("UserPromptSubmit Hook STARTED")
     debug_log(f"Arguments: {sys.argv}")
-    debug_log(f"Environment: PWD={os.getcwd()}")
+    debug_log(f"Environment: PWD={os.getcwd()}, PATH={os.environ.get('PATH', '')}")
 
     try:
         stdin_data = sys.stdin.read()

@@ -16,6 +16,25 @@ from datetime import datetime
 CLAUDE_MODEL = "haiku"  # Fast and cheap, good for summaries
 DEBUG_LOG = "/tmp/claude-debug-stop.log"
 
+def find_claude_cli() -> str:
+    """Find the claude CLI binary, checking common locations."""
+    import shutil
+    # Check PATH first
+    found = shutil.which("claude")
+    if found:
+        return found
+    # Common install locations
+    common_paths = [
+        os.path.expanduser("~/.claude/local/claude"),
+        os.path.expanduser("~/.local/bin/claude"),
+        "/usr/local/bin/claude",
+        os.path.expanduser("~/.npm-global/bin/claude"),
+    ]
+    for path in common_paths:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return "claude"  # Fallback, hope it's in PATH
+
 def debug_log(message):
     """Log debugging info with timestamp"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -210,10 +229,14 @@ Examples of good summaries:
 Be this concise."""
 
     try:
+        # Find claude CLI (handles pyenv/homebrew/npm path issues)
+        claude_bin = find_claude_cli()
+        debug_log(f"Using claude CLI: {claude_bin}")
+
         # Call Claude Code CLI in one-shot mode
         result = subprocess.run(
             [
-                "claude", "-p",
+                claude_bin, "-p",
                 "--model", CLAUDE_MODEL,
                 "--tools", "",  # Disable tools, just text generation
                 "--no-session-persistence",  # Don't save this as a session
@@ -239,9 +262,22 @@ Be this concise."""
 
 
 def main():
+    # Ensure common binary locations are in PATH (hooks may run with stripped environment)
+    extra_paths = [
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.claude/local"),
+        "/usr/local/bin",
+        os.path.expanduser("~/.npm-global/bin"),
+    ]
+    current_path = os.environ.get("PATH", "")
+    for p in extra_paths:
+        if p not in current_path:
+            current_path = f"{p}:{current_path}"
+    os.environ["PATH"] = current_path
+
     debug_log("Stop Hook STARTED")
     debug_log(f"Arguments: {sys.argv}")
-    debug_log(f"Environment: PWD={os.getcwd()}")
+    debug_log(f"Environment: PWD={os.getcwd()}, PATH={os.environ.get('PATH', '')}")
 
     try:
         stdin_data = sys.stdin.read()
