@@ -6,9 +6,16 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="$HOME/.claude/hooks"
 SETTINGS_FILE="$HOME/.claude/settings.json"
 BIN_DIR="$HOME/.local/bin"
+
+# Pull latest from GitHub before uninstalling (ensures correct cleanup logic)
+if [ -d "$SCRIPT_DIR/.git" ]; then
+    echo "Pulling latest version from GitHub..."
+    (cd "$SCRIPT_DIR" && git pull --ff-only 2>/dev/null) && echo "  Updated to latest version" || echo "  (already up to date or offline)"
+fi
 
 echo "Uninstalling claude-summary-hooks..."
 
