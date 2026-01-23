@@ -401,14 +401,16 @@ def main():
     cwd = input_data.get("cwd", os.getcwd())
     debug_log(f"Extracted - session_id: {session_id}, transcript_path: {transcript_path}, cwd: {cwd}")
 
-    # Always mark session as "waiting" when stop fires, even if summary fails
-    # This prevents dots from staying orange forever
+    # IMMEDIATELY mark session as "waiting" — this is the critical path
+    # The dot must turn green as soon as the agent stops, regardless of summary generation
+    write_session_file(session_id, cwd, "waiting", None)
+    debug_log("Marked session as waiting (dot should turn green now)")
+
+    # Now try to generate summary as a bonus (non-critical)
     try:
         _run_summary_pipeline(session_id, transcript_path, cwd)
     except Exception as e:
         debug_log(f"Summary pipeline error: {e}")
-        # Still mark as waiting even on failure
-        write_session_file(session_id, cwd, "waiting", None)
 
     debug_log("Stop Hook FINISHED")
 
