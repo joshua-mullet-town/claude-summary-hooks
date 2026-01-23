@@ -406,13 +406,24 @@ def main():
     write_session_file(session_id, cwd, "waiting", None)
     debug_log("Marked session as waiting (dot should turn green now)")
 
-    # Now try to generate summary as a bonus (non-critical)
-    try:
-        _run_summary_pipeline(session_id, transcript_path, cwd)
-    except Exception as e:
-        debug_log(f"Summary pipeline error: {e}")
-
-    debug_log("Stop Hook FINISHED")
+    # Fork summary generation into a background process so the hook exits instantly
+    # The parent (hook) exits immediately, the child generates the summary async
+    pid = os.fork()
+    if pid == 0:
+        # Child process — detach from parent and generate summary
+        try:
+            os.setsid()  # Create new session, fully detach from hook process group
+            debug_log("Background summary process started (detached)")
+            _run_summary_pipeline(session_id, transcript_path, cwd)
+            debug_log("Background summary process FINISHED")
+        except Exception as e:
+            debug_log(f"Background summary error: {e}")
+        finally:
+            os._exit(0)  # Exit child without cleanup (don't trigger atexit handlers)
+    else:
+        # Parent (hook) — exit immediately, don't wait for child
+        debug_log(f"Forked summary to background pid={pid}, hook exiting now")
+        debug_log("Stop Hook FINISHED")
 
     # Note: We keep temp_file to accumulate exchanges over time
     # user_prompt_submit.py handles trimming to MAX_EXCHANGES
