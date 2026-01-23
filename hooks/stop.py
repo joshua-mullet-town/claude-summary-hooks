@@ -234,30 +234,42 @@ Be this concise."""
         debug_log(f"Using claude CLI: {claude_bin}")
 
         # Call Claude Code CLI in one-shot mode
-        result = subprocess.run(
+        # Use Popen for better timeout handling - subprocess.run timeout can leave zombies
+        env = os.environ.copy()
+        process = subprocess.Popen(
             [
                 claude_bin, "-p",
                 "--model", CLAUDE_MODEL,
-                "--tools", "",  # Disable tools, just text generation
                 "--no-session-persistence",  # Don't save this as a session
                 summary_prompt
             ],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,  # Prevent any stdin blocking
             text=True,
-            timeout=30
+            env=env
         )
 
-        if result.returncode == 0:
-            return result.stdout.strip()
-        else:
-            debug_log(f"Claude CLI error: {result.stderr}")
-            return f"USER asked: (see conversation)\nAGENT: (Claude CLI error: {result.returncode})"
+        try:
+            stdout, stderr = process.communicate(timeout=45)
+            debug_log(f"Claude CLI finished with returncode={process.returncode}, stdout_len={len(stdout)}, stderr_len={len(stderr)}")
 
-    except subprocess.TimeoutExpired:
-        return "USER asked: (see conversation)\nAGENT: (Claude CLI timeout)"
+            if process.returncode == 0 and stdout.strip():
+                return stdout.strip()
+            else:
+                debug_log(f"Claude CLI error: returncode={process.returncode}, stderr={stderr[:200]}")
+                return f"USER asked: (see conversation)\nAGENT: (Claude CLI error: {process.returncode})"
+        except subprocess.TimeoutExpired:
+            debug_log("Claude CLI TIMEOUT - killing process")
+            process.kill()
+            process.wait()
+            return "USER asked: (see conversation)\nAGENT: (Claude CLI timeout after 45s)"
+
     except FileNotFoundError:
+        debug_log(f"Claude CLI NOT FOUND at: {claude_bin}")
         return "USER asked: (see conversation)\nAGENT: (Claude CLI not found)"
     except Exception as e:
+        debug_log(f"Claude CLI exception: {e}")
         return f"USER asked: (see conversation)\nAGENT: (error: {e})"
 
 
