@@ -12,6 +12,7 @@ import os
 import subprocess
 import pty
 import select
+import time
 from datetime import datetime
 
 # Use Claude Code CLI instead of local Ollama for better quality summaries
@@ -235,52 +236,118 @@ Be this concise."""
         claude_bin = find_claude_cli()
         debug_log(f"Using claude CLI: {claude_bin}")
 
-        # Call Claude Code CLI in one-shot mode
-        # Use Popen for better timeout handling - subprocess.run timeout can leave zombies
+        # Call Claude Code CLI in one-shot mode using PTY to prevent /dev/tty blocking
+        # Claude opens /dev/tty directly causing hangs - we detach from controlling terminal
+        # See: https://github.com/anthropics/claude-code/issues/13598
         env = os.environ.copy()
         # CRITICAL: Disable hooks for this nested Claude call to prevent infinite recursion
         env["CLAUDE_HOOK_SKIP"] = "1"
 
-        # Use 'script -q /dev/null' to fake a TTY - claude -p hangs without TTY
-        # See: https://github.com/anthropics/claude-code/issues/9026
-        # macOS script syntax: script [-q] file [command args...]
         before_claude = datetime.now()
-        process = subprocess.Popen(
-            [
-                "script", "-q", "/dev/null",
-                claude_bin, "-p",
-                "--model", CLAUDE_MODEL,
-                "--no-session-persistence",  # Don't save this as a session
-                summary_prompt
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,  # Prevent any stdin blocking
-            text=True,
-            env=env
-        )
+        debug_log("Creating PTY for claude CLI call...")
 
         try:
-            stdout, stderr = process.communicate(timeout=15)  # Reduced from 45s - should be fast with TTY
-            after_claude = datetime.now()
-            debug_log(f"Claude CLI took: {(after_claude - before_claude).total_seconds():.4f}s")
-            debug_log(f"Claude CLI finished with returncode={process.returncode}, stdout_len={len(stdout)}, stderr_len={len(stderr)}")
+            # Create pseudo-terminal pair
+            master_fd, slave_fd = pty.openpty()
+            debug_log(f"PTY created: master={master_fd}, slave={slave_fd}")
 
-            if process.returncode == 0 and stdout.strip():
-                # Success - clean up any script command artifacts
-                # Script command may add ^D or other control chars, strip them
-                clean_output = stdout.strip().replace("^D", "").strip()
+            # Spawn claude with PTY and detach from controlling terminal
+            process = subprocess.Popen(
+                [
+                    claude_bin, "-p",
+                    "--model", CLAUDE_MODEL,
+                    "--no-session-persistence",  # Don't save this as a session
+                    summary_prompt
+                ],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                start_new_session=True,  # CRITICAL: Detach from controlling terminal (prevents /dev/tty access)
+                env=env,
+                close_fds=False  # Keep slave fd open for child
+            )
+            debug_log(f"Process spawned with PID={process.pid}")
+
+            # Close slave fd in parent (child keeps it open)
+            os.close(slave_fd)
+
+            # Make master fd non-blocking
+            os.set_blocking(master_fd, False)
+
+            # Read from master fd with timeout
+            output_bytes = b""
+            timeout_duration = 90  # Increased from 15s - claude -p takes 40-50s even for simple prompts
+            timeout_start = time.time()
+            poll_interval = 0.1
+
+            debug_log(f"Starting read loop with {timeout_duration}s timeout...")
+            while time.time() - timeout_start < timeout_duration:
+                # Check if process is still running
+                if process.poll() is not None:
+                    debug_log(f"Process exited with code {process.returncode}")
+                    # Process finished, do final read
+                    try:
+                        while True:
+                            chunk = os.read(master_fd, 4096)
+                            if not chunk:
+                                break
+                            output_bytes += chunk
+                    except (BlockingIOError, OSError):
+                        pass
+                    break
+
+                # Try to read data
+                try:
+                    chunk = os.read(master_fd, 4096)
+                    if chunk:
+                        output_bytes += chunk
+                        debug_log(f"Read {len(chunk)} bytes (total: {len(output_bytes)})")
+                except BlockingIOError:
+                    # No data available yet
+                    time.sleep(poll_interval)
+                except OSError as e:
+                    debug_log(f"OSError during read: {e}")
+                    break
+
+            # Close master fd
+            os.close(master_fd)
+
+            # Check for timeout
+            if process.poll() is None:
+                debug_log("TIMEOUT - killing process")
+                process.kill()
+                process.wait()
+                return f"USER asked: (see conversation)\nAGENT: (Claude CLI timeout after {timeout_duration}s)"
+
+            # Process finished successfully
+            after_claude = datetime.now()
+            elapsed = (after_claude - before_claude).total_seconds()
+            debug_log(f"Claude CLI took: {elapsed:.4f}s")
+
+            # Decode output and strip ANSI escape codes from PTY
+            stdout = output_bytes.decode('utf-8', errors='replace')
+            # Remove ANSI escape sequences in multiple passes
+            # Pass 1: Remove full ANSI sequences (ESC-based)
+            ansi_escape_1 = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))')
+            stdout_temp = ansi_escape_1.sub('', stdout)
+            # Pass 2: Remove trailing terminal garbage lines (e.g., "9;4;0;" with BEL)
+            ansi_escape_2 = re.compile(r'\r?\n[0-9;]+[\x00-\x1F]*$')
+            stdout_clean = ansi_escape_2.sub('', stdout_temp)
+            debug_log(f"Claude CLI finished with returncode={process.returncode}, stdout_len={len(stdout)}, clean_len={len(stdout_clean)}")
+
+            if process.returncode == 0 and stdout_clean.strip():
+                # Success
+                clean_output = stdout_clean.strip()
+                debug_log(f"SUCCESS - got output: {clean_output[:100]}")
                 return clean_output
             else:
                 debug_log(f"Claude CLI error: returncode={process.returncode}")
-                debug_log(f"stdout: {stdout[:500]}")
-                debug_log(f"stderr: {stderr[:500]}")
+                debug_log(f"stdout: {stdout_clean[:500]}")
                 return f"USER asked: (see conversation)\nAGENT: (Claude CLI error: {process.returncode})"
-        except subprocess.TimeoutExpired:
-            debug_log("Claude CLI TIMEOUT (15s) - killing process")
-            process.kill()
-            process.wait()
-            return "USER asked: (see conversation)\nAGENT: (Claude CLI timeout after 15s)"
+
+        except Exception as e:
+            debug_log(f"Exception in PTY handling: {type(e).__name__}: {e}")
+            return f"USER asked: (see conversation)\nAGENT: (PTY error: {e})"
 
     except FileNotFoundError:
         debug_log(f"Claude CLI NOT FOUND at: {claude_bin}")
