@@ -10,6 +10,9 @@ import re
 import sys
 import os
 import subprocess
+import pty
+import select
+import time
 from datetime import datetime
 
 # Use Claude Code CLI instead of local Ollama for better quality summaries
@@ -36,8 +39,10 @@ def find_claude_cli() -> str:
     return "claude"  # Fallback, hope it's in PATH
 
 def debug_log(message):
-    """Log debugging info with timestamp"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Log debugging info with timestamp (only if CLAUDE_HOOK_DEBUG=1)"""
+    if os.environ.get("CLAUDE_HOOK_DEBUG") != "1":
+        return
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     with open(DEBUG_LOG, "a") as f:
         f.write(f"[{timestamp}] {message}\n")
         f.flush()
@@ -90,16 +95,6 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
                 elif line.startswith("AGENT"):
                     agent_summary = line.replace("AGENT:", "").strip()
 
-    # Preserve displayName if previously set by user
-    display_name = None
-    if os.path.exists(session_file):
-        try:
-            with open(session_file, "r") as f:
-                existing = json.load(f)
-                display_name = existing.get("displayName")
-        except:
-            pass
-
     session_data = {
         "sessionId": session_id,
         "cwd": cwd,
@@ -109,8 +104,6 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
         "agentSummary": agent_summary,
         "updatedAt": datetime.now().isoformat()
     }
-    if display_name:
-        session_data["displayName"] = display_name
 
     try:
         with open(session_file, "w") as f:
@@ -245,37 +238,118 @@ Be this concise."""
         claude_bin = find_claude_cli()
         debug_log(f"Using claude CLI: {claude_bin}")
 
-        # Call Claude Code CLI in one-shot mode
-        # Use Popen for better timeout handling - subprocess.run timeout can leave zombies
+        # Call Claude Code CLI in one-shot mode using PTY to prevent /dev/tty blocking
+        # Claude opens /dev/tty directly causing hangs - we detach from controlling terminal
+        # See: https://github.com/anthropics/claude-code/issues/13598
         env = os.environ.copy()
-        process = subprocess.Popen(
-            [
-                claude_bin, "-p",
-                "--model", CLAUDE_MODEL,
-                "--no-session-persistence",  # Don't save this as a session
-                summary_prompt
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,  # Prevent any stdin blocking
-            text=True,
-            env=env
-        )
+        # CRITICAL: Disable hooks for this nested Claude call to prevent infinite recursion
+        env["CLAUDE_HOOK_SKIP"] = "1"
+
+        before_claude = datetime.now()
+        debug_log("Creating PTY for claude CLI call...")
 
         try:
-            stdout, stderr = process.communicate(timeout=45)
-            debug_log(f"Claude CLI finished with returncode={process.returncode}, stdout_len={len(stdout)}, stderr_len={len(stderr)}")
+            # Create pseudo-terminal pair
+            master_fd, slave_fd = pty.openpty()
+            debug_log(f"PTY created: master={master_fd}, slave={slave_fd}")
 
-            if process.returncode == 0 and stdout.strip():
-                return stdout.strip()
+            # Spawn claude with PTY and detach from controlling terminal
+            process = subprocess.Popen(
+                [
+                    claude_bin, "-p",
+                    "--model", CLAUDE_MODEL,
+                    "--no-session-persistence",  # Don't save this as a session
+                    summary_prompt
+                ],
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                start_new_session=True,  # CRITICAL: Detach from controlling terminal (prevents /dev/tty access)
+                env=env,
+                close_fds=False  # Keep slave fd open for child
+            )
+            debug_log(f"Process spawned with PID={process.pid}")
+
+            # Close slave fd in parent (child keeps it open)
+            os.close(slave_fd)
+
+            # Make master fd non-blocking
+            os.set_blocking(master_fd, False)
+
+            # Read from master fd with timeout
+            output_bytes = b""
+            timeout_duration = 90  # Increased from 15s - claude -p takes 40-50s even for simple prompts
+            timeout_start = time.time()
+            poll_interval = 0.1
+
+            debug_log(f"Starting read loop with {timeout_duration}s timeout...")
+            while time.time() - timeout_start < timeout_duration:
+                # Check if process is still running
+                if process.poll() is not None:
+                    debug_log(f"Process exited with code {process.returncode}")
+                    # Process finished, do final read
+                    try:
+                        while True:
+                            chunk = os.read(master_fd, 4096)
+                            if not chunk:
+                                break
+                            output_bytes += chunk
+                    except (BlockingIOError, OSError):
+                        pass
+                    break
+
+                # Try to read data
+                try:
+                    chunk = os.read(master_fd, 4096)
+                    if chunk:
+                        output_bytes += chunk
+                        debug_log(f"Read {len(chunk)} bytes (total: {len(output_bytes)})")
+                except BlockingIOError:
+                    # No data available yet
+                    time.sleep(poll_interval)
+                except OSError as e:
+                    debug_log(f"OSError during read: {e}")
+                    break
+
+            # Close master fd
+            os.close(master_fd)
+
+            # Check for timeout
+            if process.poll() is None:
+                debug_log("TIMEOUT - killing process")
+                process.kill()
+                process.wait()
+                return f"USER asked: (see conversation)\nAGENT: (Claude CLI timeout after {timeout_duration}s)"
+
+            # Process finished successfully
+            after_claude = datetime.now()
+            elapsed = (after_claude - before_claude).total_seconds()
+            debug_log(f"Claude CLI took: {elapsed:.4f}s")
+
+            # Decode output and strip ANSI escape codes from PTY
+            stdout = output_bytes.decode('utf-8', errors='replace')
+            # Remove ANSI escape sequences in multiple passes
+            # Pass 1: Remove full ANSI sequences (ESC-based)
+            ansi_escape_1 = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))')
+            stdout_temp = ansi_escape_1.sub('', stdout)
+            # Pass 2: Remove trailing terminal garbage lines (e.g., "9;4;0;" with BEL)
+            ansi_escape_2 = re.compile(r'\r?\n[0-9;]+[\x00-\x1F]*$')
+            stdout_clean = ansi_escape_2.sub('', stdout_temp)
+            debug_log(f"Claude CLI finished with returncode={process.returncode}, stdout_len={len(stdout)}, clean_len={len(stdout_clean)}")
+
+            if process.returncode == 0 and stdout_clean.strip():
+                # Success
+                clean_output = stdout_clean.strip()
+                debug_log(f"SUCCESS - got output: {clean_output[:100]}")
+                return clean_output
             else:
-                debug_log(f"Claude CLI error: returncode={process.returncode}, stderr={stderr[:200]}")
+                debug_log(f"Claude CLI error: returncode={process.returncode}")
+                debug_log(f"stdout: {stdout_clean[:500]}")
                 return f"USER asked: (see conversation)\nAGENT: (Claude CLI error: {process.returncode})"
-        except subprocess.TimeoutExpired:
-            debug_log("Claude CLI TIMEOUT - killing process")
-            process.kill()
-            process.wait()
-            return "USER asked: (see conversation)\nAGENT: (Claude CLI timeout after 45s)"
+
+        except Exception as e:
+            debug_log(f"Exception in PTY handling: {type(e).__name__}: {e}")
+            return f"USER asked: (see conversation)\nAGENT: (PTY error: {e})"
 
     except FileNotFoundError:
         debug_log(f"Claude CLI NOT FOUND at: {claude_bin}")
@@ -378,6 +452,14 @@ def _run_summary_pipeline(session_id: str, transcript_path: str, cwd_from_input:
 
 
 def main():
+    start_time = datetime.now()
+    debug_log(f"Stop Hook STARTED at {start_time.strftime('%H:%M:%S.%f')}")
+
+    # Prevent recursive hook execution from nested claude CLI calls
+    if os.environ.get("CLAUDE_HOOK_SKIP") == "1":
+        debug_log("CLAUDE_HOOK_SKIP detected, exiting immediately")
+        sys.exit(0)
+
     # Ensure common binary locations are in PATH (hooks may run with stripped environment)
     extra_paths = [
         os.path.expanduser("~/.local/bin"),
@@ -391,16 +473,17 @@ def main():
             current_path = f"{p}:{current_path}"
     os.environ["PATH"] = current_path
 
-    debug_log("Stop Hook STARTED")
-    debug_log(f"Arguments: {sys.argv}")
-    debug_log(f"Environment: PWD={os.getcwd()}, PATH={os.environ.get('PATH', '')}")
+    after_path = datetime.now()
+    debug_log(f"Path setup took: {(after_path - start_time).total_seconds():.4f}s")
 
     try:
         stdin_data = sys.stdin.read()
-        debug_log(f"Raw stdin data: {stdin_data[:200]}...")
+        after_stdin = datetime.now()
+        debug_log(f"Reading stdin took: {(after_stdin - after_path).total_seconds():.4f}s")
 
         input_data = json.loads(stdin_data)
-        debug_log(f"Parsed input: {input_data}")
+        after_parse = datetime.now()
+        debug_log(f"Parsing JSON took: {(after_parse - after_stdin).total_seconds():.4f}s")
     except json.JSONDecodeError as e:
         debug_log(f"JSON decode error: {e}")
         sys.exit(0)
@@ -411,16 +494,21 @@ def main():
     session_id = input_data.get("session_id", "unknown")
     transcript_path = input_data.get("transcript_path", "")
     cwd = input_data.get("cwd", os.getcwd())
-    debug_log(f"Extracted - session_id: {session_id}, transcript_path: {transcript_path}, cwd: {cwd}")
 
     # IMMEDIATELY mark session as "waiting" — this is the critical path
     # The dot must turn green as soon as the agent stops, regardless of summary generation
+    before_session = datetime.now()
     write_session_file(session_id, cwd, "waiting", None)
-    debug_log("Marked session as waiting (dot should turn green now)")
+    after_session = datetime.now()
+    debug_log(f"Writing session file took: {(after_session - before_session).total_seconds():.4f}s")
 
     # Fork summary generation into a background process so the hook exits instantly
     # The parent (hook) exits immediately, the child generates the summary async
+    before_fork = datetime.now()
     pid = os.fork()
+    after_fork = datetime.now()
+    debug_log(f"Fork took: {(after_fork - before_fork).total_seconds():.4f}s")
+
     if pid == 0:
         # Child process — detach from parent and generate summary
         try:
@@ -435,7 +523,9 @@ def main():
     else:
         # Parent (hook) — exit immediately, don't wait for child
         debug_log(f"Forked summary to background pid={pid}, hook exiting now")
-        debug_log("Stop Hook FINISHED")
+        end_time = datetime.now()
+        total_time = (end_time - start_time).total_seconds()
+        debug_log(f"Stop Hook FINISHED - Total time: {total_time:.4f}s")
 
     # Note: We keep temp_file to accumulate exchanges over time
     # user_prompt_submit.py handles trimming to MAX_EXCHANGES
