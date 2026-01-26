@@ -39,7 +39,9 @@ def find_claude_cli() -> str:
     return "claude"  # Fallback, hope it's in PATH
 
 def debug_log(message):
-    """Log debugging info with timestamp"""
+    """Log debugging info with timestamp (only if CLAUDE_HOOK_DEBUG=1)"""
+    if os.environ.get("CLAUDE_HOOK_DEBUG") != "1":
+        return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     with open(DEBUG_LOG, "a") as f:
         f.write(f"[{timestamp}] {message}\n")

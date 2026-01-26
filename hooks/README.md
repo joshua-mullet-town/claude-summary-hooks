@@ -103,6 +103,21 @@ Result: Clean JSON output without corrupted escape sequences
 
 ## Debugging
 
+Debug logging is **disabled by default** to avoid filling up disk space.
+
+To enable debug logging, set the `CLAUDE_HOOK_DEBUG` environment variable:
+
+```json
+{
+  "env": {
+    "CLAUDE_HOOK_DEBUG": "1"
+  },
+  "hooks": {
+    ...
+  }
+}
+```
+
 Debug logs are written to:
 - `/tmp/claude-debug-stop.log` - stop.py execution details
 - `/tmp/claude-debug-user-prompt.log` - user_prompt_submit.py details
@@ -111,6 +126,8 @@ Check logs for timing information:
 ```bash
 tail -50 /tmp/claude-debug-stop.log
 ```
+
+**Note:** Only enable debug logging when troubleshooting issues. The logs can grow large quickly (multiple entries per message).
 
 ## Performance
 
