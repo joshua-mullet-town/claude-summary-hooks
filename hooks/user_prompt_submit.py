@@ -16,7 +16,7 @@ DEBUG_LOG = "/tmp/claude-debug-user-prompt.log"
 
 def debug_log(message):
     """Log debugging info with timestamp"""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
     with open(DEBUG_LOG, "a") as f:
         f.write(f"[{timestamp}] {message}\n")
         f.flush()
@@ -31,16 +31,13 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
     cwd_hash = hashlib.md5(cwd.encode()).hexdigest()[:12]
     session_file = os.path.join(sessions_dir, f"{cwd_hash}.json")
 
-    # Read existing data to preserve summary and displayName
+    # Read existing summary if available
     existing_summary = summary
-    display_name = None
-    if os.path.exists(session_file):
+    if not existing_summary and os.path.exists(session_file):
         try:
             with open(session_file, "r") as f:
                 existing_data = json.load(f)
-                if not existing_summary:
-                    existing_summary = existing_data.get("summary")
-                display_name = existing_data.get("displayName")
+                existing_summary = existing_data.get("summary")
         except:
             pass
 
@@ -51,8 +48,6 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
         "summary": existing_summary,
         "updatedAt": datetime.datetime.now().isoformat()
     }
-    if display_name:
-        session_data["displayName"] = display_name
 
     try:
         with open(session_file, "w") as f:
@@ -62,6 +57,14 @@ def write_session_file(session_id: str, cwd: str, status: str, summary: str = No
         debug_log(f"Error writing session file: {e}")
 
 def main():
+    start_time = datetime.datetime.now()
+    debug_log(f"UserPromptSubmit Hook STARTED at {start_time.strftime('%H:%M:%S.%f')}")
+
+    # Prevent recursive hook execution from nested claude CLI calls
+    if os.environ.get("CLAUDE_HOOK_SKIP") == "1":
+        debug_log("CLAUDE_HOOK_SKIP detected, exiting immediately")
+        sys.exit(0)
+
     # Ensure common binary locations are in PATH (hooks may run with stripped environment)
     extra_paths = [
         os.path.expanduser("~/.local/bin"),
@@ -75,16 +78,17 @@ def main():
             current_path = f"{p}:{current_path}"
     os.environ["PATH"] = current_path
 
-    debug_log("UserPromptSubmit Hook STARTED")
-    debug_log(f"Arguments: {sys.argv}")
-    debug_log(f"Environment: PWD={os.getcwd()}, PATH={os.environ.get('PATH', '')}")
+    after_path = datetime.datetime.now()
+    debug_log(f"Path setup took: {(after_path - start_time).total_seconds():.4f}s")
 
     try:
         stdin_data = sys.stdin.read()
-        debug_log(f"Raw stdin data: {stdin_data[:200]}...")
+        after_stdin = datetime.datetime.now()
+        debug_log(f"Reading stdin took: {(after_stdin - after_path).total_seconds():.4f}s")
 
         input_data = json.loads(stdin_data)
-        debug_log(f"Parsed input: {input_data}")
+        after_parse = datetime.datetime.now()
+        debug_log(f"Parsing JSON took: {(after_parse - after_stdin).total_seconds():.4f}s")
     except json.JSONDecodeError as e:
         debug_log(f"JSON decode error: {e}")
         sys.exit(0)
@@ -103,7 +107,7 @@ def main():
         sys.exit(0)
 
     temp_file = f"/tmp/claude-{session_id}-conversation.json"
-    debug_log(f"Using temp file: {temp_file}")
+    before_file_ops = datetime.datetime.now()
 
     # Load existing conversation or start fresh
     conversation = {
@@ -113,11 +117,11 @@ def main():
     }
 
     if os.path.exists(temp_file):
-        debug_log(f"Found existing conversation file")
         try:
             with open(temp_file, "r") as f:
                 conversation = json.load(f)
-                debug_log(f"Loaded existing conversation with {len(conversation.get('exchanges', []))} exchanges")
+            after_file_read = datetime.datetime.now()
+            debug_log(f"Reading conversation file took: {(after_file_read - before_file_ops).total_seconds():.4f}s")
         except (json.JSONDecodeError, FileNotFoundError) as e:
             debug_log(f"Error loading existing conversation: {e}")
     else:
@@ -135,19 +139,25 @@ def main():
     conversation["exchanges"] = conversation["exchanges"][-MAX_EXCHANGES:]
     conversation["cwd"] = cwd  # Update in case it changed
 
-    debug_log(f"Final conversation: {len(conversation['exchanges'])} exchanges")
+    before_write = datetime.datetime.now()
 
     try:
         with open(temp_file, "w") as f:
             json.dump(conversation, f)
-        debug_log(f"Successfully wrote conversation to {temp_file}")
+        after_write = datetime.datetime.now()
+        debug_log(f"Writing conversation file took: {(after_write - before_write).total_seconds():.4f}s")
     except Exception as e:
         debug_log(f"Error writing conversation file: {e}")
 
     # Write session file with "working" status for Whisper Village
+    before_session = datetime.datetime.now()
     write_session_file(session_id, cwd, "working")
+    after_session = datetime.datetime.now()
+    debug_log(f"Writing session file took: {(after_session - before_session).total_seconds():.4f}s")
 
-    debug_log("UserPromptSubmit Hook FINISHED")
+    end_time = datetime.datetime.now()
+    total_time = (end_time - start_time).total_seconds()
+    debug_log(f"UserPromptSubmit Hook FINISHED - Total time: {total_time:.4f}s")
     sys.exit(0)
 
 
